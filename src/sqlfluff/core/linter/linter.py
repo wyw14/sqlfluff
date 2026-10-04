@@ -27,6 +27,7 @@ from sqlfluff.core.linter.common import (
     RenderedFile,
     RuleTuple,
 )
+from sqlfluff.core.linter.conflict import FixConflictPreview, build_fix_preview
 from sqlfluff.core.linter.discovery import paths_from_path
 from sqlfluff.core.linter.fix import apply_fixes, compute_anchor_edit_info
 from sqlfluff.core.linter.linted_dir import LintedDir
@@ -36,7 +37,11 @@ from sqlfluff.core.linter.linted_file import (
     LintedFile,
 )
 from sqlfluff.core.linter.linting_result import LintingResult
-from sqlfluff.core.linter.patch import generate_source_patches, merge_source_patches
+from sqlfluff.core.linter.patch import (
+    FixPatch,
+    generate_source_patches,
+    merge_source_patches,
+)
 from sqlfluff.core.parser import Lexer, Parser
 from sqlfluff.core.parser.segments.base import BaseSegment, SourceFix
 from sqlfluff.core.rules import BaseRule, RulePack, get_ruleset
@@ -721,6 +726,7 @@ class Linter:
         tree: Optional[BaseSegment] = None
         templated_file: Optional[TemplatedFile] = None
         merged_source_patches = None
+        fix_preview: Optional[FixConflictPreview] = None
         t0 = time.monotonic()
 
         root_variant = parsed.root_variant()
@@ -747,7 +753,8 @@ class Linter:
         if root_variant:
             linter_logger.info("lint_parsed - linting root variant (%s)", parsed.fname)
             assert root_variant.tree  # We just checked this.
-            variant_source_patches = []
+            variant_source_patches: list[list[FixPatch]] = []
+            variant_patch_origins: list[str] = []
             (
                 fixed_tree,
                 initial_linting_errors,
@@ -770,6 +777,7 @@ class Linter:
                 variant_source_patches.append(
                     generate_source_patches(fixed_tree, root_variant.templated_file)
                 )
+                variant_patch_origins.append("root_variant")
 
             # We're only going to return the *initial* errors, rather
             # than any generated during the fixing cycle.
@@ -803,9 +811,16 @@ class Linter:
                             alternate_variant.templated_file,
                         )
                     )
+                    variant_patch_origins.append(f"alternate_variant_{idx}")
 
             if fix:
                 merged_source_patches = merge_source_patches(variant_source_patches)
+                # Build the source-space conflict preview from the same
+                # buffers, keeping the provenance of every suggestion.
+                fix_preview = build_fix_preview(
+                    variant_source_patches,
+                    origins=variant_patch_origins,
+                )
 
         # If no root variant, we should still apply ignores to any parsing
         # or templating fails.
@@ -852,6 +867,7 @@ class Linter:
             templated_file=templated_file,
             encoding=encoding,
             source_patches=merged_source_patches,
+            fix_preview=fix_preview,
         )
 
         # This is the main command line output from linting.

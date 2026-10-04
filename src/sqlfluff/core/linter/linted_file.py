@@ -23,6 +23,11 @@ from sqlfluff.core.errors import (
     SQLTemplaterError,
 )
 from sqlfluff.core.formatter import FormatterInterface
+from sqlfluff.core.linter.conflict import (
+    FixConflictPreview,
+    apply_source_patches,
+    build_fix_preview,
+)
 from sqlfluff.core.linter.patch import FixPatch, generate_source_patches
 
 # Classes needed only for type checking
@@ -74,6 +79,9 @@ class LintedFile(NamedTuple):
     templated_file: Optional[TemplatedFile]
     encoding: str
     source_patches: Optional[list[FixPatch]] = None
+    # Conflict preview built from the per-variant source patches (preserves
+    # which variant(s) suggested each edit). None for lint-only runs.
+    fix_preview: Optional[FixConflictPreview] = None
 
     def check_tuples(
         self, raise_on_non_linting_violations: bool = True
@@ -266,6 +274,60 @@ class LintedFile(NamedTuple):
 
         # The success metric here is whether anything ACTUALLY changed.
         return fixed_source_string, fixed_source_string != original_source
+
+    def fix_conflict_preview(self) -> FixConflictPreview:
+        """Preview the suggested source edits grouped by source range.
+
+        Edits suggested identically by more than one render variant appear
+        as a single preview entry; disjoint edits are compatible and
+        overlapping edits with different replacements are reported as
+        mutually exclusive alternatives (nothing is chosen automatically).
+
+        When a preview wasn't prepared up front (for example when using the
+        class directly), one is generated from the source patches or the
+        fixed parse tree.
+        """
+        if self.fix_preview is not None:
+            return self.fix_preview
+        if self.source_patches is None:
+            # Compatibility path for callers which build LintedFile without
+            # precomputed source patches.
+            assert self.templated_file, "A preview requires a templated file."
+            assert self.tree, "A preview requires a parsed file."
+            patches = [generate_source_patches(self.tree, self.templated_file)]
+        else:
+            patches = [self.source_patches]
+        return build_fix_preview(patches, origins=("source patches",))
+
+    def apply_fix_selection(
+        self,
+        selected: Iterable[FixPatch],
+        current_source_str: Optional[str] = None,
+    ) -> str:
+        """Apply a user-selected set of edits, re-verifying source text.
+
+        Args:
+            selected: The patches chosen from :meth:`fix_conflict_preview`.
+                Identical edits are applied once and disjoint edits together;
+                a selection containing mutually exclusive edits raises
+                :class:`ConflictingEditsError`.
+            current_source_str: The current content of the source file. Pass
+                the content freshly read from disk to detect that the file
+                changed after linting. If omitted, the source string recorded
+                at lint time is used.
+
+        Returns:
+            The fixed source content.
+
+        Raises:
+            StaleSourceError: If the current source no longer matches a
+                selected patch's recorded range and text. The caller should
+                re-lint rather than apply stale positions.
+        """
+        if current_source_str is None:
+            assert self.templated_file, "Applying fixes requires a templated file."
+            current_source_str = self.templated_file.source_str
+        return apply_source_patches(current_source_str, list(selected))
 
     @staticmethod
     def _slice_source_file_using_patches(

@@ -352,21 +352,16 @@ def generate_source_patches(
 
 
 def _patches_conflict(first: FixPatch, second: FixPatch) -> bool:
-    """Return whether two source patches cannot be safely applied together."""
-    if first.source_slice == second.source_slice:
-        return first.fixed_raw != second.fixed_raw
+    """Return whether two source patches cannot be safely applied together.
 
-    first_start = int(first.source_slice.start)
-    first_stop = int(first.source_slice.stop)
-    second_start = int(second.source_slice.start)
-    second_stop = int(second.source_slice.stop)
+    This is a thin wrapper around the source-space classifier in
+    :mod:`sqlfluff.core.linter.conflict`. The import is local to avoid a
+    circular import (the conflict module imports :class:`FixPatch` from this
+    module).
+    """
+    from sqlfluff.core.linter.conflict import EditRelation, classify_source_edits
 
-    if first_start == first_stop == second_start == second_stop:
-        # NOTE: It's an edge case to hit this and not the initial clause,
-        # but possible.
-        return first_start == second_start
-
-    return max(first_start, second_start) < min(first_stop, second_stop)
+    return classify_source_edits(first, second) is EditRelation.EXCLUSIVE
 
 
 def merge_source_patches(patch_buffers: list[list[FixPatch]]) -> list[FixPatch]:
