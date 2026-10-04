@@ -1952,6 +1952,234 @@ def render(
             sys.exit(EXIT_SUCCESS)
 
 
+def compare_shared_options(f: Callable) -> Callable:
+    """Add options shared equally by both sides of a config comparison.
+
+    Every option added here is applied to *both* configurations, so none
+    of them can leak from one side of the comparison into the other.
+    """
+    if shell_completion_enabled:
+        f = click.option(
+            "-d",
+            "--dialect",
+            default=None,
+            help="The dialect of SQL to lint",
+            shell_complete=dialect_shell_complete,
+        )(f)
+    else:  # pragma: no cover
+        f = click.option(
+            "-d", "--dialect", default=None, help="The dialect of SQL to lint"
+        )(f)
+    f = click.option(
+        "-t",
+        "--templater",
+        default=None,
+        help="The templater to use (default=jinja)",
+        type=click.Choice(
+            LazySequence(
+                lambda: [
+                    templater.name
+                    for templater in chain.from_iterable(
+                        get_plugin_manager().hook.get_templaters()
+                    )
+                ]
+            )
+        ),
+    )(f)
+    f = click.option(
+        "-r",
+        "--rules",
+        default=None,
+        help="Narrow the search on both sides to only specific rules.",
+    )(f)
+    f = click.option(
+        "-e",
+        "--exclude-rules",
+        default=None,
+        help="Exclude specific rules on both sides.",
+    )(f)
+    f = click.option(
+        "--ignore-local-config",
+        is_flag=True,
+        help=(
+            "Ignore config files in default search path locations for both "
+            "sides, so that only the two explicitly provided config files "
+            "(and built-in defaults) are used."
+        ),
+    )(f)
+    f = click.option("--encoding", default=None, help="File encoding.")(f)
+    f = click.option(
+        "-i",
+        "--ignore",
+        default=None,
+        help="Ignore particular families of errors on both sides.",
+    )(f)
+    f = click.option(
+        "--disable-noqa",
+        is_flag=True,
+        default=None,
+        help="Set this flag to ignore inline noqa comments.",
+    )(f)
+    f = click.option(
+        "--disable-noqa-except",
+        default=None,
+        help="Ignore all but the listed rules inline noqa comments.",
+    )(f)
+    f = click.option(
+        "--library-path",
+        default=None,
+        help="Override the jinja `library_path` configuration value.",
+    )(f)
+    f = click.option(
+        "--stdin-filename",
+        default=None,
+        help=(
+            "When using stdin as an input, load the configuration as if the "
+            "contents of stdin was in a file in the listed location."
+        ),
+        type=click.Path(allow_dash=False),
+    )(f)
+    f = click.option(
+        "--disregard-sqlfluffignores",
+        is_flag=True,
+        help="Perform the operation regardless of .sqlfluffignore configurations.",
+    )(f)
+    return f
+
+
+@cli.command(name="compare-config")
+@common_options
+@compare_shared_options
+@click.option(
+    "--baseline-config",
+    "baseline_config_path",
+    required=True,
+    help=(
+        "Path to the baseline config file (the current configuration before "
+        "the rule upgrade)."
+    ),
+    type=click.Path(),
+)
+@click.option(
+    "--candidate-config",
+    "candidate_config_path",
+    required=True,
+    help="Path to the candidate config file (the upgraded configuration).",
+    type=click.Path(),
+)
+@click.option(
+    "-f",
+    "--format",
+    "format",
+    default="human",
+    type=click.Choice(
+        [
+            FormatType.human.value,
+            FormatType.json.value,
+            FormatType.yaml.value,
+            FormatType.none.value,
+        ],
+        case_sensitive=False,
+    ),
+    help="What format to return the comparison in (default=human).",
+)
+@click.option(
+    "--write-output",
+    help="Optionally provide a filename to write the results to.",
+)
+@click.argument("paths", nargs=-1, type=click.Path(allow_dash=True))
+def compare_config(
+    paths: tuple[str],
+    baseline_config_path: str,
+    candidate_config_path: str,
+    format: str,
+    write_output: Optional[str],
+    disregard_sqlfluffignores: bool,
+    ignore_local_config: bool,
+    stdin_filename: Optional[str],
+    **kwargs,
+) -> None:
+    """Compare lint findings between two rule configurations.
+
+    The same files (or the same stdin content) are linted twice using
+    identical source content and templater inputs: once with the
+    --baseline-config and once with the --candidate-config. The command
+    reports persisted, new and disappeared findings. New and disappeared
+    findings are attributed to a rule being enabled/disabled, a rule
+    parameter change, or an undetermined cause. Templating, lexing and
+    parsing failures are shown separately for each side and never
+    presented as fixed/new findings.
+
+    This command is read-only: no files are modified, and each side uses
+    an independent configuration object.
+
+    Use a single ('-') PATH to read the SQL from stdin.
+    """
+    # Build two fully independent config objects. Separate kwargs copies
+    # are used because `get_config` prunes some keys as it processes them.
+    config_a = get_config(
+        baseline_config_path,
+        ignore_local_config,
+        require_dialect=False,
+        **dict(kwargs),
+    )
+    config_b = get_config(
+        candidate_config_path,
+        ignore_local_config,
+        require_dialect=False,
+        **dict(kwargs),
+    )
+
+    if not paths:
+        click.echo(
+            "ERROR: At least one path must be provided (or use '-' for stdin).",
+            err=True,
+        )
+        sys.exit(EXIT_ERROR)
+
+    # Imported here to keep the import cost out of the other commands.
+    from sqlfluff.core.linter.config_compare import (
+        compare_configs,
+        format_comparison_human,
+    )
+
+    _, formatter = get_linter_and_formatter(config_a)
+    # Respect --nocolor/--color and non-tty output, mirroring the other
+    # commands. This also ensures colorama is initialised on Windows.
+    colorama.init(strip=formatter.plain_output)
+    with PathAndUserErrorHandler(formatter):
+        stdin_sql = sys.stdin.read() if ("-",) == paths else None
+        comparison = compare_configs(
+            config_a,
+            config_b,
+            () if stdin_sql is not None else paths,
+            stdin_sql=stdin_sql,
+            stdin_filename=stdin_filename,
+            ignore_files=not disregard_sqlfluffignores,
+            baseline_label=baseline_config_path,
+            candidate_label=candidate_config_path,
+        )
+
+    if format == FormatType.json.value:
+        file_output = json.dumps(comparison.as_records())
+    elif format == FormatType.yaml.value:
+        file_output = yaml.dump(
+            comparison.as_records(),
+            sort_keys=False,
+            allow_unicode=True,
+        )
+    elif format == FormatType.none.value:
+        file_output = ""
+    else:
+        file_output = format_comparison_human(
+            comparison, nocolor=formatter.plain_output
+        )
+
+    # Dump the output to stdout or to file as appropriate.
+    dump_file_payload(write_output, file_output)
+    sys.exit(EXIT_SUCCESS)
+
+
 # This "__main__" handler allows invoking SQLFluff using "python -m", which
 # simplifies the use of cProfile, e.g.:
 # python -m cProfile -s cumtime -m sqlfluff.cli.commands lint slow_file.sql
