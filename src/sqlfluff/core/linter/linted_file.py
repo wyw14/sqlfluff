@@ -24,6 +24,10 @@ from sqlfluff.core.errors import (
 )
 from sqlfluff.core.formatter import FormatterInterface
 from sqlfluff.core.linter.patch import FixPatch, generate_source_patches
+from sqlfluff.core.linter.statement_fixes import (
+    StatementFixPreview,
+    build_statement_fix_preview,
+)
 
 # Classes needed only for type checking
 from sqlfluff.core.parser.segments import BaseSegment
@@ -266,6 +270,20 @@ class LintedFile(NamedTuple):
 
         # The success metric here is whether anything ACTUALLY changed.
         return fixed_source_string, fixed_source_string != original_source
+
+    def statement_fix_preview(self) -> StatementFixPreview:
+        """Break the available fixes down per source statement.
+
+        Returns a preview which attributes every edit to its owning
+        statement(s), suitable for reviewing and selectively accepting the
+        fixes of individual statements. Use
+        :meth:`sqlfluff.core.linter.linter.Linter.apply_statement_fixes` to
+        apply a selection.
+
+        The linted file must be the result of a fixing lint run
+        (``fix=True``).
+        """
+        return build_statement_fix_preview(self)
 
     @staticmethod
     def _slice_source_file_using_patches(

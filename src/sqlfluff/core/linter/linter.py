@@ -37,6 +37,11 @@ from sqlfluff.core.linter.linted_file import (
 )
 from sqlfluff.core.linter.linting_result import LintingResult
 from sqlfluff.core.linter.patch import generate_source_patches, merge_source_patches
+from sqlfluff.core.linter.statement_fixes import (
+    StatementFixPreview,
+    StatementFixResult,
+    apply_statement_fixes,
+)
 from sqlfluff.core.parser import Lexer, Parser
 from sqlfluff.core.parser.segments.base import BaseSegment, SourceFix
 from sqlfluff.core.rules import BaseRule, RulePack, get_ruleset
@@ -1124,6 +1129,55 @@ class Linter:
         result.add(linted_path)
         result.stop_timer()
         return result
+
+    def apply_statement_fixes(
+        self,
+        linted_file: LintedFile,
+        selected_statements: Sequence[int],
+        *,
+        current_source: Optional[str] = None,
+        persist: bool = False,
+        preview: Optional[StatementFixPreview] = None,
+    ) -> StatementFixResult:
+        """Apply fixes for a selection of source statements.
+
+        Args:
+            linted_file: The result of the fixing lint run which produced
+                the fixes.
+            selected_statements: Zero-based indices of the statements to
+                accept (as exposed by
+                :meth:`LintedFile.statement_fix_preview`).
+            current_source: The current source text to apply against. When
+                omitted, the backing file is re-read from disk if it exists.
+                If the current source differs from the previewed source, the
+                application is refused rather than applying stale offsets.
+            persist: When True (and the rendered result still parses), write
+                the result back to the linted file's path.
+            preview: An already generated
+                :class:`StatementFixPreview` to reuse. When omitted, one is
+                built from ``linted_file``.
+
+        Returns:
+            A :class:`StatementFixResult` describing the rendered source,
+            the edits which were applied or held back and any reparse
+            violations. When the result does not parse, ``success`` is False
+            and nothing is persisted.
+        """
+        if preview is None:
+            preview = linted_file.statement_fix_preview()
+
+        def parse_checker(source: str) -> list[SQLBaseError]:
+            parsed = self.parse_string(source, fname=linted_file.path)
+            return list(parsed.violations)
+
+        return apply_statement_fixes(
+            preview,
+            selected_statements,
+            current_source=current_source,
+            parse_checker=parse_checker,
+            persist=persist,
+            linted_file=linted_file,
+        )
 
     def lint_path(
         self,
